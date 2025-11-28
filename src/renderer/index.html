@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OperaBrowser</title>
+    <!-- Spotify Web Playback SDK callback - must be defined before SDK loads -->
+    <script>
+      window.onSpotifyWebPlaybackSDKReady = function() {
+        console.log('Spotify Web Playback SDK Ready');
+        // Dispatch event for our app to listen to
+        window.dispatchEvent(new Event('SpotifySDKReady'));
+      };
+    </script>
+    <!-- Spotify Web Playback SDK -->
+    <script src="https://sdk.scdn.co/spotify-player.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>
+
+
+
+
+

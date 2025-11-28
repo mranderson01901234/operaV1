@@ -1,0 +1,656 @@
+# Universal Assistant - Architectural Blueprint
+
+## Vision
+A desktop application with a persistent 50/50 split interface: AI chat on the left, integrated browser on the right. The LLM can observe and control the browser on user request, enabling natural language web automation while the user retains manual control.
+
+---
+
+## Core Layout Structure
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  App Header / Title Bar                                                      │
+├────────┬────────────────────────────┬───────────────────────────────────────┤
+│        │                            │                                       │
+│  Side  │      Chat Panel            │       Browser Panel                   │
+│  bar   │        (50%)               │         (50%)                         │
+│        │                            │                                       │
+│ Agents │  ┌──────────────────────┐  │  ┌─────────────────────────────────┐  │
+│ List   │  │                      │  │  │  URL Bar                        │  │
+│        │  │   Message History    │  │  ├─────────────────────────────────┤  │
+│ ────── │  │                      │  │  │                                 │  │
+│        │  │                      │  │  │                                 │  │
+│ Search │  │                      │  │  │      WebView / BrowserView      │  │
+│        │  │                      │  │  │                                 │  │
+│ ────── │  │                      │  │  │                                 │  │
+│        │  ├──────────────────────┤  │  │                                 │  │
+│Settings│  │   Input Area         │  │  │                                 │  │
+│        │  └──────────────────────┘  │  └─────────────────────────────────┘  │
+│        │                            │                                       │
+├────────┴────────────────────────────┴───────────────────────────────────────┤
+│  Status Bar (optional)                                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Fixed Proportions:**
+- Sidebar: 240px fixed width (collapsible optional, but default open)
+- Chat Panel: 50% of remaining width
+- Browser Panel: 50% of remaining width
+
+---
+
+## Technology Stack
+
+### Desktop Framework
+**Electron** (recommended over Tauri for this use case)
+- Better `<webview>` / BrowserView support for embedded browsing
+- Mature ecosystem for browser automation integration
+- Easier CDP access via `webContents.debugger`
+
+### Frontend
+- **React 18+** with TypeScript
+- **Zustand** for state management (simpler than Redux, good for this scale)
+- **TailwindCSS** for styling
+- **Framer Motion** for animations (optional polish)
+
+### Browser Automation
+- **Playwright** (bundled) for reliable action execution
+- **CDP (Chrome DevTools Protocol)** direct access via Electron's debugger API
+- Accessibility tree extraction for LLM context
+
+### Backend / Data
+- **SQLite** (via better-sqlite3) for local conversation storage
+- **Optional**: Supabase for cloud sync / multi-device (Phase 2)
+
+### LLM Integration
+- Multi-provider support: OpenAI, Anthropic, Gemini, local models
+- Unified interface with provider-specific adapters
+
+---
+
+## Core Data Models
+
+### Agent (Conversation Container)
+```typescript
+interface Agent {
+  id: string;                    // UUID
+  name: string;                  // User-defined or auto-generated
+  createdAt: Date;
+  updatedAt: Date;
+  model: string;                 // e.g., "gpt-4o", "claude-sonnet-4-20250514"
+  provider: LLMProvider;
+  systemPrompt?: string;         // Optional custom system prompt
+  browserState?: BrowserState;   // Current browser context
+}
+```
+
+### Message
+```typescript
+interface Message {
+  id: string;
+  agentId: string;
+  role: 'user' | 'assistant' | 'system' | 'tool';
+  content: string;
+  attachments?: Attachment[];    // Screenshots, files, etc.
+  toolCalls?: ToolCall[];        // Browser actions executed
+  tokenCount?: number;
+  createdAt: Date;
+}
+```
+
+### Browser State
+```typescript
+interface BrowserState {
+  url: string;
+  title: string;
+  screenshot?: string;           // Base64 for LLM context
+  accessibilityTree?: A11yNode[];// Simplified DOM for LLM
+  isLoading: boolean;
+}
+
+interface A11yNode {
+  role: string;                  // button, link, input, etc.
+  name: string;                  // Accessible name/label
+  value?: string;                // Current value for inputs
+  selector: string;              // CSS selector for action targeting
+  bounds?: DOMRect;              // Position for vision-based fallback
+}
+```
+
+### Tool Definitions
+```typescript
+interface BrowserTool {
+  name: 'navigate' | 'click' | 'type' | 'scroll' | 'screenshot' | 'extract';
+  description: string;
+  parameters: JSONSchema;
+}
+```
+
+---
+
+## Module Architecture
+
+### 1. Main Process (Electron)
+```
+src/main/
+├── index.ts                 # App entry, window management
+├── ipc/
+│   ├── handlers.ts          # IPC handler registration
+│   ├── browser.ts           # Browser control handlers
+│   └── llm.ts               # LLM request handlers
+├── browser/
+│   ├── controller.ts        # CDP/Playwright wrapper
+│   ├── a11y-extractor.ts    # Accessibility tree extraction
+│   └── screenshot.ts        # Screenshot capture
+├── llm/
+│   ├── router.ts            # Provider routing
+│   ├── providers/
+│   │   ├── openai.ts
+│   │   ├── anthropic.ts
+│   │   └── gemini.ts
+│   └── tools.ts             # Tool definitions & execution
+└── db/
+    ├── schema.ts            # SQLite schema
+    └── queries.ts           # Data access layer
+```
+
+### 2. Renderer Process (React)
+```
+src/renderer/
+├── App.tsx                  # Root layout
+├── components/
+│   ├── Layout/
+│   │   ├── Sidebar.tsx
+│   │   ├── SplitView.tsx
+│   │   └── ResizeHandle.tsx # If allowing resize
+│   ├── Chat/
+│   │   ├── ChatPanel.tsx
+│   │   ├── MessageList.tsx
+│   │   ├── MessageItem.tsx
+│   │   ├── InputArea.tsx
+│   │   └── ToolCallDisplay.tsx
+│   ├── Browser/
+│   │   ├── BrowserPanel.tsx
+│   │   ├── URLBar.tsx
+│   │   ├── BrowserView.tsx
+│   │   └── BrowserControls.tsx
+│   └── Sidebar/
+│       ├── AgentList.tsx
+│       ├── AgentItem.tsx
+│       └── SearchBar.tsx
+├── stores/
+│   ├── agentStore.ts        # Agent/conversation state
+│   ├── chatStore.ts         # Current chat state
+│   └── browserStore.ts      # Browser state
+├── hooks/
+│   ├── useAgent.ts
+│   ├── useChat.ts
+│   └── useBrowser.ts
+└── lib/
+    ├── ipc.ts               # IPC client wrapper
+    └── utils.ts
+```
+
+### 3. Shared Types
+```
+src/shared/
+├── types.ts                 # Shared type definitions
+├── constants.ts             # App constants
+└── ipc-channels.ts          # IPC channel names
+```
+
+---
+
+## Browser Integration Deep Dive
+
+### Embedding Strategy
+Use Electron's `<webview>` tag or `BrowserView` class:
+
+```typescript
+// BrowserView approach (more control)
+const browserView = new BrowserView({
+  webPreferences: {
+    nodeIntegration: false,
+    contextIsolation: true,
+    sandbox: true,
+  }
+});
+
+mainWindow.addBrowserView(browserView);
+browserView.setBounds({ x: sidebarWidth + chatWidth, y: headerHeight, width: browserWidth, height: browserHeight });
+browserView.setAutoResize({ width: true, height: true });
+```
+
+### CDP Integration for LLM Control
+```typescript
+// Enable debugger
+browserView.webContents.debugger.attach('1.3');
+
+// Execute actions
+async function clickElement(selector: string) {
+  const { root } = await browserView.webContents.debugger.sendCommand('DOM.getDocument');
+  const { nodeId } = await browserView.webContents.debugger.sendCommand('DOM.querySelector', {
+    nodeId: root.nodeId,
+    selector
+  });
+  const { model } = await browserView.webContents.debugger.sendCommand('DOM.getBoxModel', { nodeId });
+  const x = model.content[0] + model.width / 2;
+  const y = model.content[1] + model.height / 2;
+  
+  await browserView.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
+    type: 'mousePressed', x, y, button: 'left', clickCount: 1
+  });
+  await browserView.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
+    type: 'mouseReleased', x, y, button: 'left', clickCount: 1
+  });
+}
+```
+
+### Accessibility Tree Extraction
+```typescript
+async function getAccessibilityTree(): Promise<A11yNode[]> {
+  const { nodes } = await browserView.webContents.debugger.sendCommand(
+    'Accessibility.getFullAXTree'
+  );
+  
+  // Filter to interactive elements only
+  return nodes
+    .filter(node => isInteractive(node.role?.value))
+    .map(node => ({
+      role: node.role?.value,
+      name: node.name?.value || '',
+      value: node.value?.value,
+      selector: generateSelector(node),
+      bounds: node.boundingBox
+    }));
+}
+
+function isInteractive(role: string): boolean {
+  return ['button', 'link', 'textbox', 'combobox', 'checkbox', 
+          'radio', 'menuitem', 'tab', 'searchbox'].includes(role);
+}
+```
+
+---
+
+## LLM Integration Architecture
+
+### Unified Provider Interface
+```typescript
+interface LLMProvider {
+  id: string;
+  name: string;
+  models: Model[];
+  
+  chat(params: ChatParams): AsyncIterable<ChatChunk>;
+  supportsVision: boolean;
+  supportsTools: boolean;
+}
+
+interface ChatParams {
+  model: string;
+  messages: Message[];
+  tools?: Tool[];
+  images?: string[];  // Base64 screenshots
+  stream?: boolean;
+}
+```
+
+### Tool Execution Flow
+```typescript
+// 1. User sends message like "click the login button"
+// 2. Build context with current page state
+const context = await buildBrowserContext();
+// {
+//   url: "https://example.com",
+//   accessibilityTree: [...],
+//   screenshot: "base64..."
+// }
+
+// 3. Send to LLM with tools
+const response = await llm.chat({
+  model: agent.model,
+  messages: [
+    { role: 'system', content: BROWSER_AGENT_PROMPT },
+    ...conversationHistory,
+    { role: 'user', content: `Current page: ${context.url}\n\nInteractive elements:\n${formatA11yTree(context.accessibilityTree)}\n\nUser request: ${userMessage}` }
+  ],
+  tools: BROWSER_TOOLS,
+  images: [context.screenshot]  // If vision model
+});
+
+// 4. Execute tool calls
+for (const toolCall of response.toolCalls) {
+  const result = await executeBrowserTool(toolCall);
+  // Send result back to LLM for confirmation/next step
+}
+```
+
+### Browser Tools Schema
+```typescript
+const BROWSER_TOOLS = [
+  {
+    name: 'navigate',
+    description: 'Navigate to a URL',
+    parameters: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'The URL to navigate to' }
+      },
+      required: ['url']
+    }
+  },
+  {
+    name: 'click',
+    description: 'Click an element on the page',
+    parameters: {
+      type: 'object',
+      properties: {
+        selector: { type: 'string', description: 'CSS selector of element to click' },
+        elementDescription: { type: 'string', description: 'Description of what you are clicking' }
+      },
+      required: ['selector']
+    }
+  },
+  {
+    name: 'type',
+    description: 'Type text into an input field',
+    parameters: {
+      type: 'object',
+      properties: {
+        selector: { type: 'string', description: 'CSS selector of input element' },
+        text: { type: 'string', description: 'Text to type' },
+        clearFirst: { type: 'boolean', description: 'Clear existing text before typing' }
+      },
+      required: ['selector', 'text']
+    }
+  },
+  {
+    name: 'scroll',
+    description: 'Scroll the page',
+    parameters: {
+      type: 'object',
+      properties: {
+        direction: { type: 'string', enum: ['up', 'down', 'left', 'right'] },
+        amount: { type: 'number', description: 'Pixels to scroll' }
+      },
+      required: ['direction']
+    }
+  },
+  {
+    name: 'extract',
+    description: 'Extract text content from the page',
+    parameters: {
+      type: 'object',
+      properties: {
+        selector: { type: 'string', description: 'CSS selector of element to extract from' },
+        attribute: { type: 'string', description: 'Attribute to extract (default: textContent)' }
+      }
+    }
+  },
+  {
+    name: 'screenshot',
+    description: 'Take a screenshot of the current page',
+    parameters: {
+      type: 'object',
+      properties: {
+        fullPage: { type: 'boolean', description: 'Capture full page or just viewport' }
+      }
+    }
+  },
+  {
+    name: 'wait',
+    description: 'Wait for an element or condition',
+    parameters: {
+      type: 'object',
+      properties: {
+        selector: { type: 'string', description: 'CSS selector to wait for' },
+        timeout: { type: 'number', description: 'Max wait time in ms' }
+      },
+      required: ['selector']
+    }
+  }
+];
+```
+
+---
+
+## State Management
+
+### Zustand Stores
+
+```typescript
+// agentStore.ts
+interface AgentStore {
+  agents: Agent[];
+  activeAgentId: string | null;
+  
+  // Actions
+  createAgent: (name?: string) => Agent;
+  deleteAgent: (id: string) => void;
+  setActiveAgent: (id: string) => void;
+  updateAgent: (id: string, updates: Partial<Agent>) => void;
+  loadAgents: () => Promise<void>;
+}
+
+// chatStore.ts
+interface ChatStore {
+  messages: Message[];
+  isStreaming: boolean;
+  pendingToolCalls: ToolCall[];
+  
+  // Actions
+  sendMessage: (content: string, attachments?: Attachment[]) => Promise<void>;
+  appendChunk: (chunk: string) => void;
+  addToolCall: (toolCall: ToolCall) => void;
+  resolveToolCall: (id: string, result: any) => void;
+  loadMessages: (agentId: string) => Promise<void>;
+}
+
+// browserStore.ts
+interface BrowserStore {
+  url: string;
+  title: string;
+  isLoading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  
+  // Actions
+  navigate: (url: string) => void;
+  goBack: () => void;
+  goForward: () => void;
+  refresh: () => void;
+  getContext: () => Promise<BrowserState>;
+}
+```
+
+---
+
+## Scalability Considerations (Large User Base)
+
+### 1. Local-First Architecture
+- All conversation data stored locally in SQLite
+- No server dependency for core functionality
+- Reduces infrastructure costs dramatically
+
+### 2. Optional Cloud Sync (Phase 2)
+```typescript
+interface SyncConfig {
+  enabled: boolean;
+  provider: 'supabase' | 'custom';
+  syncInterval: number;  // ms
+  conflictResolution: 'local-wins' | 'remote-wins' | 'latest-wins';
+}
+```
+
+### 3. LLM Cost Management
+- **Token counting** before sending (estimate costs)
+- **Context window management** - intelligent truncation
+- **Model tiering** - use cheaper models for simple tasks
+- **Caching** - cache common tool results
+- **BYOK (Bring Your Own Key)** - let users supply API keys
+
+### 4. Telemetry (Optional, Opt-in)
+```typescript
+interface TelemetryEvent {
+  event: string;
+  properties: Record<string, any>;
+  timestamp: Date;
+  // No PII, no conversation content
+}
+```
+Track: app opens, agent creates, model usage, feature adoption, errors
+
+### 5. Update Mechanism
+- **Electron-updater** for auto-updates
+- Delta updates to minimize download size
+- Staged rollouts (percentage-based)
+
+---
+
+## Security Considerations
+
+### Browser Isolation
+- Embedded browser runs in sandboxed process
+- No `nodeIntegration` in webview
+- Context isolation enabled
+
+### API Key Storage
+- Use Electron's `safeStorage` API for encryption
+- Keys stored in OS keychain (macOS) / credential manager (Windows) / libsecret (Linux)
+
+```typescript
+import { safeStorage } from 'electron';
+
+function storeApiKey(provider: string, key: string) {
+  const encrypted = safeStorage.encryptString(key);
+  store.set(`apiKeys.${provider}`, encrypted.toString('base64'));
+}
+
+function getApiKey(provider: string): string | null {
+  const encrypted = store.get(`apiKeys.${provider}`);
+  if (!encrypted) return null;
+  return safeStorage.decryptString(Buffer.from(encrypted, 'base64'));
+}
+```
+
+### Content Security
+- CSP headers for renderer
+- No `eval()` or dynamic code execution
+- Sanitize any HTML rendered in chat
+
+---
+
+## Development Phases
+
+### Phase 1: Foundation (Weeks 1-2)
+- [ ] Project setup (Electron + React + TypeScript)
+- [ ] Basic layout (sidebar, 50/50 split)
+- [ ] SQLite integration
+- [ ] Agent CRUD operations
+- [ ] Basic chat UI (no LLM yet)
+
+### Phase 2: LLM Integration (Weeks 3-4)
+- [ ] Provider abstraction layer
+- [ ] OpenAI integration
+- [ ] Anthropic integration
+- [ ] Streaming responses
+- [ ] Message persistence
+
+### Phase 3: Browser Integration (Weeks 5-6)
+- [ ] BrowserView embedding
+- [ ] URL bar & navigation controls
+- [ ] CDP connection
+- [ ] Accessibility tree extraction
+- [ ] Screenshot capture
+
+### Phase 4: Browser Automation (Weeks 7-8)
+- [ ] Tool definitions
+- [ ] Tool execution engine
+- [ ] LLM ↔ Browser action loop
+- [ ] Error handling & recovery
+- [ ] Visual feedback for actions
+
+### Phase 5: Polish & Launch Prep (Weeks 9-10)
+- [ ] Settings UI (API keys, preferences)
+- [ ] Onboarding flow
+- [ ] Auto-updater
+- [ ] Crash reporting
+- [ ] Landing page & distribution
+
+---
+
+## File Structure Summary
+
+```
+universal-assistant/
+├── package.json
+├── electron-builder.json
+├── tsconfig.json
+├── tailwind.config.js
+├── src/
+│   ├── main/                    # Electron main process
+│   │   ├── index.ts
+│   │   ├── ipc/
+│   │   ├── browser/
+│   │   ├── llm/
+│   │   └── db/
+│   ├── renderer/                # React frontend
+│   │   ├── App.tsx
+│   │   ├── components/
+│   │   ├── stores/
+│   │   ├── hooks/
+│   │   └── lib/
+│   ├── shared/                  # Shared types & constants
+│   │   ├── types.ts
+│   │   └── ipc-channels.ts
+│   └── preload/                 # Preload scripts
+│       └── index.ts
+├── resources/                   # App icons, assets
+├── scripts/                     # Build scripts
+└── tests/
+```
+
+---
+
+## Quick Start Commands
+
+```bash
+# Initialize project
+npm create electron-vite@latest universal-assistant -- --template react-ts
+
+# Install core dependencies
+npm install zustand better-sqlite3 @anthropic-ai/sdk openai
+
+# Install dev dependencies
+npm install -D @electron/rebuild tailwindcss postcss autoprefixer
+
+# Rebuild native modules for Electron
+npx electron-rebuild
+
+# Development
+npm run dev
+
+# Build for distribution
+npm run build
+```
+
+---
+
+## Key Success Metrics
+
+1. **Time to first message** - Under 3 seconds from app launch
+2. **Browser action success rate** - >90% for common actions
+3. **Memory footprint** - Under 500MB typical usage
+4. **Startup time** - Under 2 seconds
+5. **Crash-free sessions** - >99.5%
+
+---
+
+## Notes
+
+- Start with the simplest possible implementation that works
+- Resist feature creep until core loop is solid
+- The 50/50 split should feel native and responsive
+- Browser automation should be optional enhancement, not required
+- Users should never feel "stuck" waiting for AI

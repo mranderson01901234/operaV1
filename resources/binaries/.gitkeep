@@ -1,0 +1,6 @@
+# This directory contains platform-specific antiword binaries
+# Binaries should be placed here before building the application:
+# - linux/antiword
+# - darwin/antiword  
+# - win32/antiword.exe
+

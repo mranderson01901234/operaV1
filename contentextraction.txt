@@ -1,0 +1,1051 @@
+# Fix Content Extraction: Filter CSS/JS and Page Chrome
+
+## Problem
+
+The deep research feature is extracting CSS styles, JavaScript code, and page UI elements instead of actual article content. This results in useless "facts" like:
+
+```json
+{
+  "claim": "The font-family 'Montserrat' is used.",
+  "context": "@font-face { font-family: 'Montserrat'; ... }"
+},
+{
+  "claim": "The .cnotice element has a background color of #f8f9fa."
+},
+{
+  "claim": "The light theme is identified as \"gfgThemeLight\"."
+}
+```
+
+These are website styling details, not educational content. The LLM is extracting from raw HTML that includes `<style>` and `<script>` tags.
+
+**Secondary issue:** JSON parsing failures due to content overflow and special characters.
+
+---
+
+## Root Cause
+
+The `page-retriever.ts` is passing raw HTML or inadequately cleaned text to the fact extraction LLM. The extraction includes:
+
+- `<style>` tag contents (CSS rules)
+- `<script>` tag contents (JavaScript code, site config)
+- Navigation, footer, sidebar content
+- Cookie notices, popups, ads
+- Theme configuration objects
+
+---
+
+## Files to Modify
+
+1. `src/main/research/page-retriever.ts` - Main content extraction
+2. `src/main/research/source-evaluator.ts` - Fact extraction and validation
+3. Create: `src/main/research/content-cleaner.ts` - Dedicated cleaning utilities
+4. Create: `src/main/research/fact-validator.ts` - Post-extraction validation
+
+---
+
+## Implementation
+
+### Step 1: Create Content Cleaner Utility
+
+Create `src/main/research/content-cleaner.ts`:
+
+```typescript
+// src/main/research/content-cleaner.ts
+
+/**
+ * Cleans HTML content to extract only meaningful article text.
+ * Removes CSS, JavaScript, navigation, footers, ads, and other page chrome.
+ */
+
+// Elements that should never be considered content
+const REMOVE_TAGS = [
+  'script',
+  'style',
+  'noscript',
+  'iframe',
+  'svg',
+  'canvas',
+  'video',
+  'audio',
+  'map',
+  'object',
+  'embed',
+]
+
+// Structural elements that are rarely main content
+const REMOVE_STRUCTURAL = [
+  'header',
+  'footer', 
+  'nav',
+  'aside',
+  'menu',
+  'menuitem',
+]
+
+// Class/ID patterns that indicate non-content (case-insensitive)
+const NON_CONTENT_PATTERNS = [
+  // Navigation & Layout
+  'sidebar', 'side-bar', 'side_bar',
+  'navbar', 'nav-bar', 'navigation',
+  'menu', 'breadcrumb',
+  'header', 'footer', 'masthead',
+  
+  // Ads & Promotions
+  'ad-', 'ads-', 'advert', 'advertisement',
+  'sponsor', 'promoted', 'promo',
+  'banner', 'adsense', 'ad_',
+  
+  // UI Elements
+  'popup', 'modal', 'overlay', 'lightbox',
+  'cookie', 'consent', 'gdpr',
+  'newsletter', 'subscribe', 'signup',
+  'social', 'share', 'sharing',
+  'comment', 'disqus', 'discuss',
+  
+  // Widgets
+  'widget', 'related', 'recommended',
+  'trending', 'popular', 'latest-posts',
+  'author-bio', 'about-author',
+  'tag-cloud', 'categories',
+  
+  // Site-specific junk
+  'gfg', 'theme', 'dark-mode', 'light-mode',
+]
+
+// Patterns that indicate CSS/JS content in text
+const CSS_JS_PATTERNS = [
+  /\{\s*[\w-]+\s*:\s*[^}]+\}/g,           // CSS rules: { property: value }
+  /@font-face\s*\{/gi,                      // @font-face declarations
+  /@media\s*[\(\[]/gi,                      // @media queries
+  /@keyframes\s+\w+/gi,                     // @keyframes animations
+  /@import\s+/gi,                           // @import statements
+  /\.[\w-]+\s*\{[^}]*\}/g,                 // .class { } rules
+  /#[\w-]+\s*\{[^}]*\}/g,                  // #id { } rules
+  /\bfunction\s*\([^)]*\)\s*\{/g,          // function() { }
+  /\bconst\s+\w+\s*=\s*\{/g,               // const x = { }
+  /\blet\s+\w+\s*=\s*\{/g,                 // let x = { }
+  /\bvar\s+\w+\s*=\s*\{/g,                 // var x = { }
+  /=>[\s]*\{/g,                             // Arrow functions
+  /document\.(querySelector|getElementById|getElementsBy)/g,
+  /window\.(addEventListener|location|innerWidth)/g,
+  /classList\.(add|remove|toggle)/g,
+  /addEventListener\s*\(/g,
+  /Object\.freeze\s*\(/g,
+  /export\s+(default\s+)?(function|class|const)/g,
+  /import\s+.*from\s+['"]/g,
+]
+
+/**
+ * Remove HTML tags and their contents
+ */
+function removeTagsWithContent(html: string, tags: string[]): string {
+  let result = html
+  
+  for (const tag of tags) {
+    // Match opening tag with any attributes, content, and closing tag
+    const pattern = new RegExp(`<${tag}[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi')
+    result = result.replace(pattern, ' ')
+    
+    // Also remove self-closing versions
+    const selfClosing = new RegExp(`<${tag}[^>]*\\/?>`, 'gi')
+    result = result.replace(selfClosing, ' ')
+  }
+  
+  return result
+}
+
+/**
+ * Remove elements by class/id patterns
+ */
+function removeByClassIdPatterns(html: string, patterns: string[]): string {
+  let result = html
+  
+  for (const pattern of patterns) {
+    // Match div/section/etc with class containing pattern
+    const classRegex = new RegExp(
+      `<(div|section|aside|span|p|ul|ol|li|article)[^>]*class="[^"]*${pattern}[^"]*"[^>]*>[\\s\\S]*?<\\/\\1>`,
+      'gi'
+    )
+    result = result.replace(classRegex, ' ')
+    
+    // Match elements with id containing pattern
+    const idRegex = new RegExp(
+      `<(div|section|aside|span|p|ul|ol|li|article)[^>]*id="[^"]*${pattern}[^"]*"[^>]*>[\\s\\S]*?<\\/\\1>`,
+      'gi'
+    )
+    result = result.replace(idRegex, ' ')
+  }
+  
+  return result
+}
+
+/**
+ * Strip all HTML tags, keeping only text content
+ */
+function stripHtmlTags(html: string): string {
+  return html
+    // Replace block elements with newlines
+    .replace(/<\/(p|div|section|article|h[1-6]|li|tr|br)>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    // Remove all remaining tags
+    .replace(/<[^>]+>/g, ' ')
+    // Decode common entities
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&[a-z]+;/gi, ' ')
+    // Clean whitespace
+    .replace(/\s+/g, ' ')
+    .replace(/\n\s*\n/g, '\n\n')
+    .trim()
+}
+
+/**
+ * Remove CSS/JS patterns from text content
+ */
+function removeCssJsFromText(text: string): string {
+  let result = text
+  
+  for (const pattern of CSS_JS_PATTERNS) {
+    result = result.replace(pattern, ' ')
+  }
+  
+  // Remove lines that look like code
+  const lines = result.split('\n')
+  const cleanedLines = lines.filter(line => {
+    const trimmed = line.trim()
+    
+    // Skip empty lines
+    if (!trimmed) return true
+    
+    // Skip lines that are mostly special characters (likely code)
+    const specialChars = (trimmed.match(/[{}\[\]();:=<>\/\\|&^%$#@!~`]/g) || []).length
+    const ratio = specialChars / trimmed.length
+    if (ratio > 0.3) return false
+    
+    // Skip very short lines with code-like patterns
+    if (trimmed.length < 50 && /^[\w\s]*[{(=;]/.test(trimmed)) return false
+    
+    return true
+  })
+  
+  return cleanedLines.join('\n')
+}
+
+/**
+ * Try to extract main content container
+ */
+function extractMainContainer(html: string): string | null {
+  // Priority order of content containers
+  const selectors = [
+    // Semantic HTML5
+    /<main[^>]*>([\s\S]*?)<\/main>/i,
+    /<article[^>]*>([\s\S]*?)<\/article>/i,
+    
+    // Common content classes
+    /<div[^>]*class="[^"]*\b(post-content|article-content|entry-content|main-content|page-content|content-body|post-body|article-body)\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+    
+    // Common content IDs
+    /<div[^>]*id="[^"]*\b(content|main|article|post|entry)\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+    
+    // Generic content class
+    /<div[^>]*class="[^"]*\bcontent\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+  ]
+  
+  for (const selector of selectors) {
+    const match = html.match(selector)
+    if (match) {
+      // Get the captured group (content inside the container)
+      const content = match[1] || match[2]
+      if (content && content.length > 500) {
+        return content
+      }
+    }
+  }
+  
+  return null
+}
+
+/**
+ * Main cleaning function - takes raw HTML, returns clean text content
+ */
+export function cleanHtmlContent(html: string): string {
+  console.log(`[ContentCleaner] Input size: ${html.length} chars`)
+  
+  // Step 1: Remove script and style tags first (most important)
+  let cleaned = removeTagsWithContent(html, REMOVE_TAGS)
+  console.log(`[ContentCleaner] After removing tags: ${cleaned.length} chars`)
+  
+  // Step 2: Remove structural non-content elements
+  cleaned = removeTagsWithContent(cleaned, REMOVE_STRUCTURAL)
+  
+  // Step 3: Remove elements by class/id patterns
+  cleaned = removeByClassIdPatterns(cleaned, NON_CONTENT_PATTERNS)
+  console.log(`[ContentCleaner] After removing patterns: ${cleaned.length} chars`)
+  
+  // Step 4: Try to extract main content container
+  const mainContent = extractMainContainer(cleaned)
+  if (mainContent) {
+    cleaned = mainContent
+    console.log(`[ContentCleaner] Found main container: ${cleaned.length} chars`)
+  }
+  
+  // Step 5: Strip remaining HTML tags
+  let text = stripHtmlTags(cleaned)
+  
+  // Step 6: Remove any CSS/JS that leaked through
+  text = removeCssJsFromText(text)
+  
+  // Step 7: Final cleanup
+  text = text
+    .replace(/\s+/g, ' ')
+    .replace(/\n\s*\n\s*\n/g, '\n\n')
+    .trim()
+  
+  console.log(`[ContentCleaner] Final output: ${text.length} chars`)
+  
+  return text
+}
+
+/**
+ * Extract content using browser execution (more reliable than regex)
+ * Returns JavaScript code to execute in browser context
+ */
+export function getBrowserExtractionScript(): string {
+  return `
+    (function() {
+      // Clone body to avoid modifying the page
+      const clone = document.body.cloneNode(true);
+      
+      // Remove non-content elements
+      const removeSelectors = [
+        'script', 'style', 'noscript', 'iframe', 'svg', 'canvas',
+        'header', 'footer', 'nav', 'aside', 'menu',
+        '[class*="sidebar"]', '[class*="side-bar"]',
+        '[class*="navbar"]', '[class*="nav-bar"]', '[class*="navigation"]',
+        '[class*="ad-"]', '[class*="ads-"]', '[class*="advert"]',
+        '[class*="cookie"]', '[class*="consent"]', '[class*="gdpr"]',
+        '[class*="popup"]', '[class*="modal"]', '[class*="overlay"]',
+        '[class*="newsletter"]', '[class*="subscribe"]',
+        '[class*="social"]', '[class*="share"]',
+        '[class*="comment"]', '[class*="disqus"]',
+        '[class*="widget"]', '[class*="related"]',
+        '[class*="footer"]', '[class*="header"]',
+        '[id*="sidebar"]', '[id*="nav"]',
+        '[id*="ad-"]', '[id*="ads-"]',
+        '[id*="cookie"]', '[id*="popup"]',
+        '[id*="footer"]', '[id*="header"]',
+        '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
+        '[role="complementary"]', '[aria-hidden="true"]',
+      ];
+      
+      removeSelectors.forEach(selector => {
+        try {
+          clone.querySelectorAll(selector).forEach(el => el.remove());
+        } catch (e) {}
+      });
+      
+      // Try to find main content container
+      const mainSelectors = [
+        'main',
+        'article',
+        '[role="main"]',
+        '.post-content', '.article-content', '.entry-content',
+        '.main-content', '.page-content', '.content-body',
+        '#content', '#main', '#article',
+      ];
+      
+      for (const selector of mainSelectors) {
+        const main = clone.querySelector(selector);
+        if (main && main.innerText.trim().length > 500) {
+          return main.innerText.trim();
+        }
+      }
+      
+      // Fallback: return cleaned body text
+      return clone.innerText.trim();
+    })()
+  `;
+}
+
+/**
+ * Validate extracted text - returns true if it looks like real content
+ */
+export function isValidContent(text: string): boolean {
+  if (!text || text.length < 100) {
+    return false
+  }
+  
+  // Check for excessive code-like content
+  const codeIndicators = [
+    /\{[\s\S]*\}/g,                    // Braces (CSS/JS objects)
+    /function\s*\(/g,                   // Functions
+    /const\s+\w+\s*=/g,                // Const declarations
+    /\.\w+\s*\{/g,                     // CSS selectors
+    /#\w+\s*\{/g,                      // CSS ID selectors
+  ]
+  
+  let codeMatches = 0
+  for (const pattern of codeIndicators) {
+    const matches = text.match(pattern)
+    codeMatches += matches ? matches.length : 0
+  }
+  
+  // If more than 10% of content looks like code, it's probably not clean
+  const codeRatio = codeMatches / (text.length / 100)
+  if (codeRatio > 0.1) {
+    console.log(`[ContentCleaner] Content rejected: too much code (ratio: ${codeRatio.toFixed(3)})`)
+    return false
+  }
+  
+  return true
+}
+```
+
+### Step 2: Create Fact Validator
+
+Create `src/main/research/fact-validator.ts`:
+
+```typescript
+// src/main/research/fact-validator.ts
+
+import { ExtractedFact } from './types'
+
+/**
+ * Validates extracted facts to filter out CSS, JS, and other garbage
+ */
+
+// Patterns that indicate the "fact" is actually CSS/JS code
+const INVALID_FACT_PATTERNS = [
+  // CSS properties
+  /font-family/i,
+  /font-size/i,
+  /font-weight/i,
+  /background-color/i,
+  /background-image/i,
+  /border-radius/i,
+  /border-width/i,
+  /padding|margin/i,
+  /width\s*:\s*\d+px/i,
+  /height\s*:\s*\d+px/i,
+  /display\s*:\s*(flex|block|none|inline)/i,
+  /position\s*:\s*(absolute|relative|fixed)/i,
+  /z-index/i,
+  /opacity/i,
+  /transform/i,
+  /transition/i,
+  /animation/i,
+  /color\s*:\s*#[0-9a-f]/i,
+  /rgba?\s*\(/i,
+  
+  // CSS selectors
+  /^\./,                               // Starts with .class
+  /^#[\w-]+\s*\{/,                     // Starts with #id {
+  /\.[\w-]+\s*\{/,                     // .class { }
+  /::before|::after/i,
+  /:hover|:focus|:active/i,
+  /@media\s*\(/i,
+  /@font-face/i,
+  /@keyframes/i,
+  /@import/i,
+  
+  // JavaScript patterns
+  /addEventListener/i,
+  /querySelector/i,
+  /getElementById/i,
+  /getElementsBy/i,
+  /classList\./i,
+  /\.innerHTML/i,
+  /\.innerText/i,
+  /\.textContent/i,
+  /document\./i,
+  /window\./i,
+  /console\./i,
+  /Object\.freeze/i,
+  /Object\.assign/i,
+  /JSON\.(parse|stringify)/i,
+  /localStorage/i,
+  /sessionStorage/i,
+  /fetch\s*\(/i,
+  /async\s+function/i,
+  /=>\s*\{/,                           // Arrow functions
+  /function\s*\([^)]*\)\s*\{/,
+  /const\s+\w+\s*=\s*\{/,
+  /let\s+\w+\s*=\s*\{/,
+  /var\s+\w+\s*=\s*\{/,
+  /export\s+(default\s+)?/,
+  /import\s+.*from/,
+  /require\s*\(/,
+  /module\.exports/,
+  
+  // Site-specific junk
+  /gfgTheme/i,
+  /darkMode|lightMode|dark-mode|light-mode/i,
+  /themeList/i,
+  
+  // HTML/DOM structure
+  /<\/?[\w-]+/,                        // HTML tags
+  /&[a-z]+;/i,                         // HTML entities
+  /data-[\w-]+=/i,                     // Data attributes
+  
+  // Measurement/styling values
+  /\d+px\s*(,|\}|;)/,
+  /\d+rem\s*(,|\}|;)/,
+  /\d+em\s*(,|\}|;)/,
+  /\d+%\s*(,|\}|;)/,
+  /\d+vh\s*(,|\}|;)/,
+  /\d+vw\s*(,|\}|;)/,
+]
+
+// Categories that are always suspicious
+const SUSPICIOUS_CATEGORIES = [
+  'specification',  // Often used for CSS specs
+  'styling',
+  'configuration',
+  'config',
+]
+
+// Minimum content requirements
+const MIN_CLAIM_LENGTH = 15
+const MAX_CLAIM_LENGTH = 500
+const MIN_CONTEXT_LENGTH = 20
+
+/**
+ * Check if a fact is valid content (not CSS/JS garbage)
+ */
+export function isValidFact(fact: ExtractedFact): boolean {
+  const { claim, context, category, confidence } = fact
+  
+  // Combine claim and context for pattern matching
+  const combined = `${claim} ${context || ''}`.toLowerCase()
+  
+  // Check against invalid patterns
+  for (const pattern of INVALID_FACT_PATTERNS) {
+    if (pattern.test(combined)) {
+      console.log(`[FactValidator] Rejected (pattern match): "${claim.substring(0, 60)}..."`)
+      return false
+    }
+  }
+  
+  // Check suspicious categories
+  if (category && SUSPICIOUS_CATEGORIES.includes(category.toLowerCase())) {
+    // Extra scrutiny for suspicious categories
+    const hasCodeChars = /[{}\[\]();=<>]/.test(claim)
+    if (hasCodeChars) {
+      console.log(`[FactValidator] Rejected (suspicious category + code chars): "${claim.substring(0, 60)}..."`)
+      return false
+    }
+  }
+  
+  // Length checks
+  if (claim.length < MIN_CLAIM_LENGTH) {
+    console.log(`[FactValidator] Rejected (too short): "${claim}"`)
+    return false
+  }
+  
+  if (claim.length > MAX_CLAIM_LENGTH) {
+    console.log(`[FactValidator] Rejected (too long): "${claim.substring(0, 60)}..."`)
+    return false
+  }
+  
+  // Check for excessive special characters (likely code)
+  const specialChars = (claim.match(/[{}\[\]();:=<>\/\\|&^%$#@!~`]/g) || []).length
+  const specialRatio = specialChars / claim.length
+  if (specialRatio > 0.15) {
+    console.log(`[FactValidator] Rejected (too many special chars: ${(specialRatio * 100).toFixed(1)}%): "${claim.substring(0, 60)}..."`)
+    return false
+  }
+  
+  // Check for code-like structure in claim
+  if (/^\s*[\w]+\s*[({=]/.test(claim)) {
+    console.log(`[FactValidator] Rejected (code-like structure): "${claim.substring(0, 60)}..."`)
+    return false
+  }
+  
+  // Claim should have some natural language characteristics
+  const hasSpaces = claim.includes(' ')
+  const hasNaturalWords = /\b(the|is|are|was|were|has|have|can|will|should|a|an|for|to|of|in|on|with|by|from|at)\b/i.test(claim)
+  
+  if (!hasSpaces || !hasNaturalWords) {
+    console.log(`[FactValidator] Rejected (not natural language): "${claim.substring(0, 60)}..."`)
+    return false
+  }
+  
+  return true
+}
+
+/**
+ * Filter an array of facts, keeping only valid ones
+ */
+export function filterValidFacts(facts: ExtractedFact[]): ExtractedFact[] {
+  const validFacts = facts.filter(isValidFact)
+  
+  const filtered = facts.length - validFacts.length
+  if (filtered > 0) {
+    console.log(`[FactValidator] Filtered ${filtered}/${facts.length} invalid facts`)
+  }
+  
+  return validFacts
+}
+
+/**
+ * Score a fact's quality (0-100)
+ */
+export function scoreFact(fact: ExtractedFact): number {
+  let score = fact.confidence || 50
+  
+  // Boost for longer, more detailed claims
+  if (fact.claim.length > 50) score += 5
+  if (fact.claim.length > 100) score += 5
+  
+  // Boost for having context
+  if (fact.context && fact.context.length > 50) score += 10
+  
+  // Boost for concrete values
+  if (fact.value && String(fact.value).length > 0) score += 10
+  
+  // Penalize vague categories
+  if (fact.category === 'claim' || fact.category === 'other') score -= 5
+  
+  // Boost for specific categories
+  if (['pricing', 'feature', 'statistic', 'date', 'fact'].includes(fact.category)) {
+    score += 5
+  }
+  
+  return Math.max(0, Math.min(100, score))
+}
+```
+
+### Step 3: Update Page Retriever
+
+Modify `src/main/research/page-retriever.ts`:
+
+```typescript
+// src/main/research/page-retriever.ts
+
+import { SearchResult, ExtractedContent, TableData } from './types'
+import { cleanHtmlContent, getBrowserExtractionScript, isValidContent } from './content-cleaner'
+
+interface BrowserController {
+  navigate(url: string): Promise<void>
+  executeScript(script: string): Promise<any>
+  getPageInfo(): Promise<{ title: string; url: string }>
+  getHtml(): Promise<string>
+}
+
+export class PageRetriever {
+  private cache = new Map<string, ExtractedContent>()
+  private readonly CACHE_TTL = 300000 // 5 minutes
+  
+  constructor(
+    private browser: BrowserController,
+    private maxConcurrent: number = 2
+  ) {}
+
+  async retrieveAll(
+    searchResults: SearchResult[],
+    maxPages: number = 20
+  ): Promise<ExtractedContent[]> {
+    const startTime = performance.now()
+    
+    // Deduplicate URLs
+    const uniqueUrls = [...new Set(searchResults.map(r => r.url))]
+    const urlsToFetch = uniqueUrls.slice(0, maxPages)
+    
+    console.log(`[PageRetriever] Fetching ${urlsToFetch.length} unique pages`)
+    
+    const contents: ExtractedContent[] = []
+    
+    for (const url of urlsToFetch) {
+      // Check cache first
+      const cached = this.cache.get(url)
+      if (cached && Date.now() - cached.fetchedAt.getTime() < this.CACHE_TTL) {
+        contents.push(cached)
+        continue
+      }
+      
+      try {
+        const content = await this.fetchAndExtract(url)
+        if (content && isValidContent(content.mainContent)) {
+          contents.push(content)
+          this.cache.set(url, content)
+        } else {
+          console.log(`[PageRetriever] Skipped invalid content from ${url}`)
+        }
+      } catch (error) {
+        console.error(`[PageRetriever] Failed to fetch ${url}:`, error)
+      }
+    }
+    
+    console.log(`[PageRetriever] Retrieved ${contents.length} valid pages in ${performance.now() - startTime}ms`)
+    
+    return contents
+  }
+  
+  private async fetchAndExtract(url: string): Promise<ExtractedContent | null> {
+    const startTime = performance.now()
+    
+    try {
+      await this.browser.navigate(url)
+      
+      // Wait for content to load
+      await this.delay(1500)
+      
+      const pageInfo = await this.browser.getPageInfo()
+      
+      // METHOD 1: Try browser-side extraction first (most reliable)
+      let mainContent: string
+      try {
+        const script = getBrowserExtractionScript()
+        mainContent = await this.browser.executeScript(script)
+        console.log(`[PageRetriever] Browser extraction got ${mainContent?.length || 0} chars`)
+      } catch (e) {
+        console.log(`[PageRetriever] Browser extraction failed, falling back to HTML cleaning`)
+        mainContent = ''
+      }
+      
+      // METHOD 2: Fallback to HTML cleaning if browser extraction failed
+      if (!mainContent || mainContent.length < 500) {
+        const html = await this.browser.getHtml()
+        mainContent = cleanHtmlContent(html)
+        console.log(`[PageRetriever] HTML cleaning got ${mainContent.length} chars`)
+      }
+      
+      // Validate content quality
+      if (!isValidContent(mainContent)) {
+        console.log(`[PageRetriever] Content validation failed for ${url}`)
+        return null
+      }
+      
+      // Extract structured data from HTML (tables still useful)
+      const html = await this.browser.getHtml()
+      const tables = this.extractTables(html)
+      const headings = this.extractHeadings(html)
+      const publishDate = this.extractPublishDate(html, mainContent)
+      
+      const content: ExtractedContent = {
+        url,
+        title: pageInfo.title,
+        domain: new URL(url).hostname,
+        publishDate,
+        mainContent: this.truncateContent(mainContent, 8000),
+        tables,
+        lists: [], // Skip lists - often navigation
+        headings,
+        wordCount: mainContent.split(/\s+/).length,
+        fetchedAt: new Date(),
+      }
+      
+      console.log(`[PageRetriever] Extracted ${content.wordCount} words from ${url} in ${performance.now() - startTime}ms`)
+      
+      return content
+    } catch (error) {
+      console.error(`[PageRetriever] Extraction failed for ${url}:`, error)
+      return null
+    }
+  }
+  
+  private truncateContent(content: string, maxLength: number): string {
+    if (content.length <= maxLength) return content
+    
+    // Truncate at sentence boundary if possible
+    const truncated = content.substring(0, maxLength)
+    const lastSentence = truncated.lastIndexOf('. ')
+    
+    if (lastSentence > maxLength * 0.8) {
+      return truncated.substring(0, lastSentence + 1)
+    }
+    
+    // Fallback to word boundary
+    const lastSpace = truncated.lastIndexOf(' ')
+    return truncated.substring(0, lastSpace) + '...'
+  }
+  
+  private extractTables(html: string): TableData[] {
+    // Keep existing implementation but add validation
+    const tables: TableData[] = []
+    const tableMatches = html.matchAll(/<table[^>]*>([\s\S]*?)<\/table>/gi)
+    
+    for (const match of tableMatches) {
+      const tableHtml = match[1]
+      
+      // Skip tables that look like layout tables
+      if (/<table[^>]*class="[^"]*layout/i.test(match[0])) continue
+      
+      const headers: string[] = []
+      const headerMatches = tableHtml.matchAll(/<th[^>]*>([\s\S]*?)<\/th>/gi)
+      for (const hMatch of headerMatches) {
+        const text = this.stripHtml(hMatch[1]).trim()
+        if (text.length > 0 && text.length < 100) {
+          headers.push(text)
+        }
+      }
+      
+      const rows: string[][] = []
+      const rowMatches = tableHtml.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)
+      for (const rMatch of rowMatches) {
+        const cells: string[] = []
+        const cellMatches = rMatch[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)
+        for (const cMatch of cellMatches) {
+          const text = this.stripHtml(cMatch[1]).trim()
+          if (text.length < 200) {
+            cells.push(text)
+          }
+        }
+        if (cells.length > 0 && cells.some(c => c.length > 0)) {
+          rows.push(cells)
+        }
+      }
+      
+      // Only keep tables with actual content
+      if ((headers.length > 0 || rows.length > 1) && rows.some(r => r.join('').length > 10)) {
+        tables.push({ headers, rows, context: '' })
+      }
+    }
+    
+    return tables
+  }
+  
+  private extractHeadings(html: string): string[] {
+    const headings: string[] = []
+    const headingMatches = html.matchAll(/<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/gi)
+    
+    for (const match of headingMatches) {
+      const text = this.stripHtml(match[1]).trim()
+      // Filter out navigation-like headings
+      if (text.length > 3 && text.length < 150 && !/^(menu|nav|share|follow|related)/i.test(text)) {
+        headings.push(text)
+      }
+    }
+    
+    return headings.slice(0, 20) // Limit to top 20 headings
+  }
+  
+  private extractPublishDate(html: string, text: string): Date | undefined {
+    const patterns = [
+      /<meta[^>]*property="article:published_time"[^>]*content="([^"]+)"/i,
+      /<meta[^>]*name="date"[^>]*content="([^"]+)"/i,
+      /<meta[^>]*name="publish[_-]?date"[^>]*content="([^"]+)"/i,
+      /<time[^>]*datetime="([^"]+)"/i,
+      /"datePublished"\s*:\s*"([^"]+)"/i,
+      /published:?\s*(\w+\s+\d{1,2},?\s+\d{4})/i,
+    ]
+    
+    for (const pattern of patterns) {
+      const match = html.match(pattern)
+      if (match) {
+        const parsed = new Date(match[1])
+        if (!isNaN(parsed.getTime()) && parsed.getFullYear() > 2000) {
+          return parsed
+        }
+      }
+    }
+    
+    return undefined
+  }
+  
+  private stripHtml(html: string): string {
+    return html
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#?\w+;/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+  }
+  
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms))
+  }
+}
+```
+
+### Step 4: Update Source Evaluator
+
+Modify `src/main/research/source-evaluator.ts` to use fact validation:
+
+```typescript
+// Add to source-evaluator.ts
+
+import { filterValidFacts, scoreFact } from './fact-validator'
+
+// In the evaluateSource method, after extracting facts:
+
+private async evaluateSource(
+  content: ExtractedContent,
+  subQuestions: SubQuestion[]
+): Promise<SourceEvaluation> {
+  // ... existing authority/recency/relevance scoring ...
+  
+  // Extract facts
+  const rawFacts = await this.extractFacts(content)
+  
+  // FILTER OUT INVALID FACTS (CSS, JS, etc.)
+  const validFacts = filterValidFacts(rawFacts)
+  
+  // Score remaining facts
+  const scoredFacts = validFacts.map(fact => ({
+    ...fact,
+    confidence: scoreFact(fact),
+  }))
+  
+  console.log(`[SourceEvaluator] ${content.url}: ${rawFacts.length} raw facts -> ${scoredFacts.length} valid facts`)
+  
+  return {
+    url: content.url,
+    domain: content.domain,
+    authorityScore,
+    recencyScore,
+    relevanceScore,
+    overallScore,
+    extractedFacts: scoredFacts,
+    content,
+  }
+}
+
+// Also update the extractFacts prompt to be more explicit:
+
+private async extractFacts(content: ExtractedContent): Promise<ExtractedFact[]> {
+  const truncatedContent = content.mainContent.substring(0, 5000)
+  
+  const prompt = `Extract factual information from this article. 
+
+IMPORTANT RULES:
+- Extract ONLY facts from the article content
+- DO NOT extract CSS styling information (colors, fonts, sizes, etc.)
+- DO NOT extract JavaScript code or configuration
+- DO NOT extract website UI elements (buttons, menus, themes)
+- Focus on: statistics, dates, names, features, prices, comparisons
+- Each fact should be a complete, meaningful statement
+- Maximum 15 facts
+
+URL: ${content.url}
+TITLE: ${content.title}
+
+ARTICLE CONTENT:
+${truncatedContent}
+
+Respond with ONLY valid JSON (no markdown):
+{"facts":[{"claim":"statement of fact","value":"specific value if applicable","context":"sentence where fact appears","confidence":80,"category":"pricing|feature|statistic|date|fact"}]}`
+
+  try {
+    const response = await this.llm.complete({
+      model: 'gemini-2.5-flash',
+      messages: [{ role: 'user', content: prompt }],
+      maxTokens: 1500,
+      temperature: 0.1,
+    })
+    
+    // Clean and parse response
+    let jsonStr = response.content
+      .replace(/```json\s*/gi, '')
+      .replace(/```\s*/gi, '')
+      .trim()
+    
+    const parsed = JSON.parse(jsonStr)
+    return parsed.facts.map((f: any) => ({
+      ...f,
+      sourceUrl: content.url,
+    }))
+  } catch (error) {
+    console.error(`[SourceEvaluator] Fact extraction failed for ${content.url}:`, error)
+    return []
+  }
+}
+```
+
+---
+
+## Verification Checklist
+
+After implementing these fixes, test with the same query and verify:
+
+- [ ] No CSS properties in extracted facts (font-family, background-color, etc.)
+- [ ] No JavaScript code in extracted facts (addEventListener, querySelector, etc.)
+- [ ] No theme/config objects (gfgThemeLight, etc.)
+- [ ] Facts contain natural language statements
+- [ ] Content length is reasonable (500-8000 chars typically)
+- [ ] Tables extracted are data tables, not layout tables
+- [ ] Headings extracted are content headings, not navigation
+
+### Test Commands
+
+```typescript
+// Test content cleaner
+import { cleanHtmlContent, isValidContent } from './content-cleaner'
+
+const testHtml = `
+  <html>
+    <head><style>.foo { color: red; }</style></head>
+    <body>
+      <nav>Navigation</nav>
+      <main>
+        <article>
+          <h1>Learn JavaScript</h1>
+          <p>JavaScript is a programming language used for web development.</p>
+          <p>It was created in 1995 by Brendan Eich.</p>
+        </article>
+      </main>
+      <footer>Copyright 2024</footer>
+      <script>console.log('test')</script>
+    </body>
+  </html>
+`
+
+const cleaned = cleanHtmlContent(testHtml)
+console.log('Cleaned content:', cleaned)
+console.log('Is valid:', isValidContent(cleaned))
+
+// Expected output should contain ONLY:
+// "Learn JavaScript JavaScript is a programming language..."
+// NO CSS, NO JS, NO nav/footer
+```
+
+```typescript
+// Test fact validator
+import { isValidFact } from './fact-validator'
+
+const badFacts = [
+  { claim: "The font-family 'Montserrat' is used.", category: 'specification' },
+  { claim: "The .cnotice element has background-color #f8f9fa", category: 'styling' },
+  { claim: "gfgThemeLight is the light theme", category: 'configuration' },
+]
+
+const goodFacts = [
+  { claim: "JavaScript was created in 1995 by Brendan Eich", category: 'fact' },
+  { claim: "React has over 200,000 GitHub stars", category: 'statistic' },
+]
+
+badFacts.forEach(f => console.log(`Bad fact valid: ${isValidFact(f)}`))  // Should all be false
+goodFacts.forEach(f => console.log(`Good fact valid: ${isValidFact(f)}`)) // Should all be true
+```
+
+---
+
+## Expected Results
+
+**Before fix:**
+```json
+{
+  "claim": "The font-family 'Montserrat' is used.",
+  "confidence": 95
+}
+```
+
+**After fix:**
+```json
+{
+  "claim": "JavaScript is a high-level programming language used for web development.",
+  "confidence": 85,
+  "category": "fact"
+}
+```
+
+The deep research output should now contain actual educational content about JavaScript, not website styling information.

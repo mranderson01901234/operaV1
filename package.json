@@ -1,0 +1,58 @@
+{
+  "name": "operabrowser",
+  "version": "1.0.0",
+  "description": "Universal Assistant - AI chat with integrated browser",
+  "main": "out/main/main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "ELECTRON_DISABLE_SANDBOX=1 electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "prepare-binaries": "bash scripts/download-binaries.sh",
+    "postinstall": "npm run prepare-binaries || echo 'Binary download skipped - ensure binaries are in resources/binaries/ before building'"
+  },
+  "electronDownload": {
+    "mirror": "https://github.com/castlabs/electron-releases/releases/download/v"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.71.0",
+    "@google/generative-ai": "^0.24.1",
+    "@monaco-editor/react": "^4.7.0",
+    "@react-three/drei": "^9.88.13",
+    "@react-three/fiber": "^8.15.19",
+    "@tiptap/react": "^3.11.1",
+    "@tiptap/starter-kit": "^3.11.1",
+    "better-sqlite3": "^12.4.6",
+    "doc-extract": "^1.0.4",
+    "docx": "^9.5.1",
+    "electron-store": "^11.0.2",
+    "mammoth": "^1.11.0",
+    "monaco-editor": "^0.55.1",
+    "openai": "^6.9.1",
+    "pdf-lib": "^1.17.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-image-crop": "^11.0.10",
+    "react-pdf": "^10.2.0",
+    "three": "^0.151.0",
+    "uuid": "^13.0.0",
+    "xlsx": "^0.18.5",
+    "zustand": "^4.4.7"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.7.2",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/react": "^18.2.43",
+    "@types/react-dom": "^18.2.17",
+    "@types/three": "^0.151.0",
+    "@types/uuid": "^10.0.0",
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.16",
+    "electron": "github:castlabs/electron-releases#v39.0.0+wvcus",
+    "electron-vite": "^2.0.0",
+    "postcss": "^8.4.32",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.8"
+  }
+}
